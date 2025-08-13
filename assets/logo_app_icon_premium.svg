@@ -1,0 +1,48 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2B221D"/>
+      <stop offset="1" stop-color="#8E4C32"/>
+    </linearGradient>
+    <style>
+      .gold{stroke:#CBA46A;fill:none;stroke-linecap:round;stroke-linejoin:round}
+      .thin{stroke-width:20}
+      .med{stroke-width:28}
+      .thick{stroke-width:36}
+    </style>
+  </defs>
+
+  <!-- background -->
+  <rect x="64" y="64" width="896" height="896" rx="220" fill="url(#bg)"/>
+
+  <!-- crest ring -->
+  <circle cx="512" cy="512" r="360" class="gold thin" opacity=".25"/>
+
+  <!-- head -->
+  <circle cx="420" cy="330" r="70" class="gold thin"/>
+
+  <!-- torso / lapels -->
+  <path d="M340 700 L420 430 L500 700" class="gold thick"/>
+
+  <!-- knot -->
+  <path d="M420 430 l-20 15 20 15 20-15 -20-15z" fill="#CBA46A" stroke="none"/>
+
+  <!-- napkin -->
+  <rect x="368" y="560" width="64" height="100" rx="12" class="gold thin"/>
+
+  <!-- arm + tray -->
+  <path d="M512 540 C600 580, 686 602, 770 610" class="gold thick"/>
+  <line x1="770" y1="610" x2="904" y2="610" class="gold thick"/>
+
+  <!-- clock -->
+  <circle cx="856" cy="480" r="86" class="gold med"/>
+  <g class="gold thin">
+    <line x1="856" y1="404" x2="856" y2="424"/>
+    <line x1="856" y1="536" x2="856" y2="556"/>
+    <line x1="780" y1="480" x2="800" y2="480"/>
+    <line x1="912" y1="480" x2="932" y2="480"/>
+  </g>
+  <line x1="856" y1="480" x2="856" y2="420" class="gold med"/>
+  <line x1="856" y1="480" x2="916" y2="480" class="gold med"/>
+  <circle cx="856" cy="480" r="10" fill="#CBA46A"/>
+</svg>
