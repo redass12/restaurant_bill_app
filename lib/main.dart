@@ -18,7 +18,6 @@ import 'package:printing/printing.dart';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart' show kIsWeb;
 
-
 import 'screens/login_screen.dart';
 
 //seeder data
@@ -453,7 +452,6 @@ class RestaurantState extends ChangeNotifier {
 
           for (final m in rawItems) {
             // Cast each list element to a proper typed map
-           
 
             final itemMap = (m as Map).cast<String, dynamic>();
 
@@ -467,7 +465,6 @@ class RestaurantState extends ChangeNotifier {
                 quantity: _toInt(itemMap['qty']),
               ),
             );
-            
           }
 
           if (tableNo > 0)
@@ -1012,8 +1009,6 @@ class RestaurantState extends ChangeNotifier {
     }
   }
 
-
-
   /// Supprime une collection par pages (évite la limite 500 opérations/batch).
   Future<void> _deleteCollectionPaged(
     CollectionReference<Map<String, dynamic>> col, {
@@ -1222,7 +1217,6 @@ class RestaurantState extends ChangeNotifier {
     }
   }
 
-
   // ---------- Minuit ----------
   void _scheduleMidnightTick() {
     _midnightTimer?.cancel();
@@ -1397,7 +1391,6 @@ class _RootScreenState extends State<RootScreen> {
         child: Column(
           children: [
             // Uncomment if you want the global error banner again:
-           
             Expanded(child: _pages[_index]),
           ],
         ),
@@ -1438,14 +1431,11 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
   String? _catId;
   String? _subId;
   Dish? _dish;
-  final _qtyCtl = TextEditingController(text: '1');
-  final _formKey = GlobalKey<FormState>();
 
-  @override
-  void dispose() {
-    _qtyCtl.dispose();
-    super.dispose();
-  }
+  // ✅ plus de TextEditingController pour la quantité
+  int qty = 1;
+
+  final _formKey = GlobalKey<FormState>();
 
   @override
   Widget build(BuildContext context) {
@@ -1468,30 +1458,27 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
 
     final theme = Theme.of(context);
 
-    // ===== Keyboard-safe, scrollable page body =====
     return Padding(
       padding: const EdgeInsets.all(16),
       child: SingleChildScrollView(
-        // Add bottom padding equal to keyboard height so buttons stay visible
         padding: EdgeInsets.only(
           bottom: MediaQuery.of(context).viewInsets.bottom + 8,
         ),
         child: ConstrainedBox(
-          // Ensure the content can still fill the screen when keyboard is hidden
           constraints: BoxConstraints(
             minHeight: MediaQuery.of(context).size.height - kToolbarHeight,
           ),
           child: Column(
             children: [
-              // Table selector + totals
+              // ===== Entête : Sélecteur de table (gauche), Statut centré, Totaux (droite)
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(12),
                   child: Row(
                     children: [
-                      const Icon(Icons.table_restaurant),
-                      const SizedBox(width: 12),
+                      // LEFT: Table selector
                       Expanded(
+                        flex: 4,
                         child: DropdownButtonFormField<int>(
                           value: table.tableNumber,
                           decoration: const InputDecoration(
@@ -1512,45 +1499,54 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                             final idx = state.tables.indexWhere(
                               (t) => t.tableNumber == v,
                             );
-                            if (idx >= 0)
-                              setState(() => _selectedTableIndex = idx);
+                            if (idx >= 0) setState(() => _selectedTableIndex = idx);
                           },
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color:
-                              (table.items.isNotEmpty
+
+                      // CENTER: Status chip
+                      Expanded(
+                        flex: 3,
+                        child: Align(
+                          alignment: Alignment.center,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: (table.items.isNotEmpty
                                       ? Colors.green
                                       : Colors.grey)
                                   .withOpacity(0.12),
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                        child: Text(
-                          table.items.isNotEmpty ? 'Ouverte' : 'Vide',
-                          style: const TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                      const Spacer(),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(
-                            'Sous-total: ${_fmt(table.total)}',
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          Text(
-                            'Total jour: ${_fmt(state.dailyTotal)}',
-                            style: TextStyle(
-                              color: theme.colorScheme.onSurfaceVariant,
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text(
+                              table.items.isNotEmpty ? 'Ouverte' : 'Vide',
+                              style: const TextStyle(fontWeight: FontWeight.w600),
                             ),
                           ),
-                        ],
+                        ),
+                      ),
+
+                      // RIGHT: Totals
+                      Expanded(
+                        flex: 4,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              'Sous-total: ${_fmt(table.total)}',
+                              style: const TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                            Text(
+                              'Total jour: ${_fmt(state.dailyTotal)}',
+                              style: TextStyle(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
@@ -1559,7 +1555,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
 
               const SizedBox(height: 8),
 
-              // Add line: Category -> Sub -> Dish -> Qty (responsive)
+              // ===== Ajout d’article : Cat -> Sub -> Dish -> Qté(stepper)
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(12),
@@ -1579,7 +1575,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
 
                         const SizedBox(height: 8),
 
-                        // Helpful hints
+                        // Hints
                         if (categories.isEmpty)
                           const Align(
                             alignment: Alignment.centerLeft,
@@ -1593,9 +1589,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                             alignment: Alignment.centerLeft,
                             child: Text(
                               'La catégorie "${selectedCat.name}" est vide. Ajoute au moins une sous-catégorie.',
-                              style: TextStyle(
-                                color: theme.colorScheme.secondary,
-                              ),
+                              style: TextStyle(color: Colors.orange),
                             ),
                           )
                         else if (selectedSub != null && dishes.isEmpty)
@@ -1603,9 +1597,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                             alignment: Alignment.centerLeft,
                             child: Text(
                               'La sous-catégorie "${selectedSub.name}" ne contient aucun plat.',
-                              style: TextStyle(
-                                color: theme.colorScheme.secondary,
-                              ),
+                              style: TextStyle(color: Colors.orange),
                             ),
                           ),
                       ],
@@ -1616,7 +1608,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
 
               const SizedBox(height: 12),
 
-              // Orders list (still scrolls within the page scroll)
+              // ===== Liste des articles de la table
               Card(
                 child: Column(
                   children: [
@@ -1636,7 +1628,6 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                       ),
                     ),
                     const Divider(height: 1),
-                    // Use shrinkWrap + disable internal scrolling so the outer SingleChildScrollView handles it
                     if (table.items.isEmpty)
                       const Padding(
                         padding: EdgeInsets.symmetric(vertical: 24),
@@ -1661,21 +1652,16 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                                   dish: it.dish,
                                   quantity: it.quantity,
                                 );
-                                context.read<RestaurantState>().removeItem(
-                                  table.tableNumber,
-                                  it.dish,
-                                );
+                                context
+                                    .read<RestaurantState>()
+                                    .removeItem(table.tableNumber, it.dish);
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(
-                                    content: Text(
-                                      'Supprimé ${removed.dish.name}',
-                                    ),
+                                    content: Text('Supprimé ${removed.dish.name}'),
                                     action: SnackBarAction(
                                       label: 'Annuler',
                                       onPressed: () {
-                                        context
-                                            .read<RestaurantState>()
-                                            .addDishToTable(
+                                        context.read<RestaurantState>().addDishToTable(
                                               table.tableNumber,
                                               removed.dish,
                                               quantity: removed.quantity,
@@ -1688,13 +1674,10 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                                 context.showError('Suppression impossible.');
                               }
                             },
-
                             child: ListTile(
                               title: Text(
                                 it.dish.name,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                ),
+                                style: const TextStyle(fontWeight: FontWeight.w600),
                               ),
                               subtitle: Text('${_fmt(it.dish.price)} / unité'),
                               trailing: ConstrainedBox(
@@ -1713,9 +1696,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                                             it.dish,
                                             it.quantity - 1,
                                           ),
-                                      icon: const Icon(
-                                        Icons.remove_circle_outline,
-                                      ),
+                                      icon: const Icon(Icons.remove_circle_outline),
                                     ),
                                     SizedBox(
                                       width: 32,
@@ -1723,8 +1704,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                                         child: Text(
                                           '${it.quantity}',
                                           style: const TextStyle(
-                                            fontWeight: FontWeight.w700,
-                                          ),
+                                              fontWeight: FontWeight.w700),
                                         ),
                                       ),
                                     ),
@@ -1737,9 +1717,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                                             it.dish,
                                             it.quantity + 1,
                                           ),
-                                      icon: const Icon(
-                                        Icons.add_circle_outline,
-                                      ),
+                                      icon: const Icon(Icons.add_circle_outline),
                                     ),
                                     const SizedBox(width: 6),
                                     Flexible(
@@ -1761,16 +1739,16 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
 
               const SizedBox(height: 10),
 
-              // Actions + PDF
+              // ===== Actions + PDF
               Row(
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
                       onPressed: table.items.isEmpty
                           ? null
-                          : () => context.read<RestaurantState>().clearTable(
-                              table.tableNumber,
-                            ),
+                          : () => context
+                              .read<RestaurantState>()
+                              .clearTable(table.tableNumber),
                       icon: const Icon(Icons.clear_all),
                       label: const Text('Vider la table'),
                     ),
@@ -1815,7 +1793,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
     );
   }
 
-  // ---------- Responsive Add-Line Controls (phone = column, desktop = row)
+  // ---------- Ligne d’ajout (Cat/Sub/Dish + Qté stepper + Ajouter)
   Widget _buildAddLineControls(
     BuildContext context,
     List<MenuCategory> categories,
@@ -1827,7 +1805,6 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
   ) {
     final isPhone = MediaQuery.of(context).size.width < 600;
 
-    // Build fields once so we can reuse in Row/Column
     final categoryField = DropdownButtonFormField<String>(
       value: _catId,
       isExpanded: true,
@@ -1868,7 +1845,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
             },
       validator: (_) {
         if (selectedCat == null) return 'Choisir';
-        if (subcats.isEmpty) return null; // allow empty; warn below
+        if (subcats.isEmpty) return null;
         return (_subId == null || _subId!.isEmpty) ? 'Choisir' : null;
       },
     );
@@ -1905,26 +1882,48 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
       },
     );
 
-    final qtyField = SizedBox(
-      width: isPhone ? double.infinity : 80,
-      child: TextFormField(
-        controller: _qtyCtl,
-        decoration: const InputDecoration(
-          labelText: 'Qté',
-          prefixIcon: Icon(Icons.confirmation_number_outlined),
+    // ✅ Qté stepper (à la place du TextFormField)
+    final qtyStepper = Row(
+      children: [
+        const Icon(Icons.confirmation_number_outlined),
+        const SizedBox(width: 12),
+        const Text(
+          'Qté',
+          style: TextStyle(fontWeight: FontWeight.w600),
         ),
-        keyboardType: const TextInputType.numberWithOptions(
-          signed: false,
-          decimal: false,
+        const SizedBox(width: 12),
+        Container(
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.grey.shade300),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.remove_circle_outline),
+                onPressed: qty > 1 ? () => setState(() => qty--) : null,
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  '$qty',
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.add_circle_outline),
+                onPressed: () => setState(() => qty++),
+              ),
+            ],
+          ),
         ),
-        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-        textAlign: isPhone ? TextAlign.start : TextAlign.center,
-        validator: (v) {
-          final n = int.tryParse(v ?? '');
-          if (n == null || n <= 0) return '1+';
-          return null;
-        },
-      ),
+      ],
     );
 
     final addBtn = FilledButton.icon(
@@ -1935,7 +1934,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
         }
         if (subcats.isEmpty) {
           context.showError(
-            'La catégorie "${selectedCat!.name}" n’a pas de sous-catégorie. Ajoute-en dans "Menu & Tables".',
+            'La catégorie "${selectedCat.name}" n’a pas de sous-catégorie. Ajoute-en dans "Menu & Tables".',
           );
           return;
         }
@@ -1945,7 +1944,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
         }
         if (dishes.isEmpty) {
           context.showError(
-            'La sous-catégorie "${selectedSub!.name}" n’a pas de plat. Ajoute des plats dans "Menu & Tables".',
+            'La sous-catégorie "${selectedSub.name}" n’a pas de plat. Ajoute des plats dans "Menu & Tables".',
           );
           return;
         }
@@ -1953,16 +1952,14 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
           context.showError('Choisis un plat.');
           return;
         }
-        if (!_formKey.currentState!.validate()) return;
-
-        final qty = int.tryParse(_qtyCtl.text.trim()) ?? 1;
+        // plus de validation de champ quantité — c’est un entier contrôlé
         try {
           context.read<RestaurantState>().addDishToTable(
-            state.tables[_selectedTableIndex].tableNumber,
-            _dish!,
-            quantity: qty,
-          );
-          setState(() => _qtyCtl.text = '1');
+                state.tables[_selectedTableIndex].tableNumber,
+                _dish!,
+                quantity: qty,
+              );
+          setState(() => qty = 1); // reset si tu veux
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Ajouté: ${_dish!.name} ×$qty')),
           );
@@ -1974,7 +1971,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
       label: const Text('Ajouter'),
     );
 
-    // Layout: Column on phones, Row on larger screens
+    // Layout responsive
     if (isPhone) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1985,7 +1982,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
           const SizedBox(height: 8),
           dishField,
           const SizedBox(height: 8),
-          qtyField,
+          qtyStepper,
           const SizedBox(height: 8),
           addBtn,
         ],
@@ -1999,7 +1996,11 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
           const SizedBox(width: 8),
           Expanded(flex: 4, child: dishField),
           const SizedBox(width: 8),
-          SizedBox(width: 80, child: qtyField),
+          // stepper prend une largeur fixe lisible
+          ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 160),
+            child: qtyStepper,
+          ),
           const SizedBox(width: 8),
           addBtn,
         ],
@@ -2007,6 +2008,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
     }
   }
 }
+
 
 // Swipe bg
 class _SwipeBg extends StatelessWidget {
@@ -2074,7 +2076,6 @@ class DailyScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-
                   // Ton UI responsive inchangée
                   LayoutBuilder(
                     builder: (context, constraints) {
@@ -3095,7 +3096,6 @@ extension FirstWhereNullExt<E> on Iterable<E> {
     return null;
   }
 }
-
 
 int _toInt(dynamic v) {
   if (v is num) return v.toInt();
