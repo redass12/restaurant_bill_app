@@ -42,6 +42,9 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  firebase_core: ^4.0.0
+  firebase_auth: ^6.0.1
+  cloud_firestore: ^6.0.0
 
 dev_dependencies:
   flutter_test:
@@ -61,8 +64,9 @@ dev_dependencies:
 flutter:
 
   assets:
-    - assets/logo_mark_premium.svg
-    - assets/logo_app_icon_premium.svg
+    - assets/logo.png
+    - assets/fonts/Roboto-Regular.ttf
+    - assets/fonts/Roboto-Bold.ttf
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
