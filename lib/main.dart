@@ -1012,75 +1012,7 @@ class RestaurantState extends ChangeNotifier {
     }
   }
 
-  /// Remise à zéro complète du resto.
-  /// - Vide toutes les tables (items = [])
-  /// - Met le total du jour à 0 et vide le journal du jour
-  /// - Efface tout l’historique /days (optionnel)
-  /// - Garde le menu par défaut (optionnel)
-  // Future<void> resetAllData({
-  //   bool keepMenu = true,
-  //   bool deleteHistory = true,
-  // }) async {
-  //   try {
-  //     // 1) Vider toutes les tables
-  //     final tablesSnap = await _tablesCol.get();
-  //     var batch = _db.batch();
-  //     for (final d in tablesSnap.docs) {
-  //       batch.set(d.reference, {
-  //         'items': [],
-  //         'updatedAt': FieldValue.serverTimestamp(),
-  //       }, SetOptions(merge: true));
-  //     }
-  //     await batch.commit();
 
-  //     // 2) Remettre le jour courant à 0 + vider le journal du jour
-  //     final todayRef = _daysCol.doc(_todayKey());
-  //     await todayRef.set({'total': 0.0}, SetOptions(merge: true));
-
-  //     final jrSnap = await todayRef.collection('journal').get();
-  //     if (jrSnap.docs.isNotEmpty) {
-  //       batch = _db.batch();
-  //       for (final j in jrSnap.docs) {
-  //         batch.delete(j.reference);
-  //       }
-  //       await batch.commit();
-  //     }
-
-  //     // 3) (Optionnel) supprimer tout l’historique /days
-  //     if (deleteHistory) {
-  //       await _deleteCollectionPaged(_daysCol, deleteJournalSub: true);
-  //       // Recréer un doc du jour "propre"
-  //       await _daysCol.doc(_todayKey()).set({
-  //         'total': 0.0,
-  //         'tz': 'Europe/Paris',
-  //         'updatedAt': FieldValue.serverTimestamp(),
-  //       }, SetOptions(merge: true));
-  //     }
-
-  //     // 4) (Optionnel) vider le menu
-  //     if (!keepMenu) {
-  //       await _restaurantDoc.set({'menuTree': []}, SetOptions(merge: true));
-  //       _menu = const [];
-  //     }
-
-  //     // 5) Nettoyage de l’état local
-  //     for (final t in _tables) t.clear();
-  //     _dailyTotal = 0.0;
-  //     _journalToday = [];
-  //     _historyTotals.clear();
-  //     notifyListeners();
-  //   } catch (e, st) {
-  //     errorCenter.report(
-  //       AppError(
-  //         userMessage: 'Impossible de remettre les données à zéro. Réessayez.',
-  //         error: e,
-  //         stackTrace: st,
-  //         onRetry: () =>
-  //             resetAllData(keepMenu: keepMenu, deleteHistory: deleteHistory),
-  //       ),
-  //     );
-  //   }
-  // }
 
   /// Supprime une collection par pages (évite la limite 500 opérations/batch).
   Future<void> _deleteCollectionPaged(
@@ -1210,7 +1142,7 @@ class RestaurantState extends ChangeNotifier {
                 padding: const pw.EdgeInsets.only(top: 40),
                 child: pw.Text(
                   totalJour > 0
-                      ? 'Le journal a été purgé plus tôt. Impression du total uniquement.'
+                      ? 'Impression du total uniquement.'
                       : 'Aucune vente enregistrée aujourd\'hui.',
                   style: pw.TextStyle(font: baseFont, fontSize: 14),
                 ),
