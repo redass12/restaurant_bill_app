@@ -334,14 +334,25 @@ class TableOrder {
   void clear() => items.clear();
 }
 
+enum UserRole { manager, server }
+
 // ===================================================================
 // APP STATE — Firestore (centralisé) + temps réel
 // ===================================================================
 class RestaurantState extends ChangeNotifier {
-  RestaurantState({required this.errorCenter, required this.restaurantId});
+  RestaurantState({
+    required this.errorCenter,
+    required this.restaurantId,
+    required this.currentUid,
+    required this.role,
+  });
 
   final ErrorCenter errorCenter;
   final String restaurantId;
+  final String currentUid;
+  final UserRole role;
+
+  String get todayKey => _todayKey();
 
   // Firestore refs
   final FirebaseFirestore _db = FirebaseFirestore.instance;
@@ -366,9 +377,51 @@ class RestaurantState extends ChangeNotifier {
   );
   List<TableOrder> get tables => List.unmodifiable(_tables);
 
+  Future<void> claimTable(int tableNumber) async {
+    try {
+      await _tableDoc(tableNumber).set({
+        'tableNumber': tableNumber,
+        'assignedTo': currentUid,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (e, st) {
+      errorCenter.report(
+        AppError(
+          userMessage: 'Impossible de prendre la table.',
+          error: e,
+          stackTrace: st,
+        ),
+      );
+    }
+  }
+
+  Future<void> releaseTable(int tableNumber) async {
+    try {
+      await _tableDoc(tableNumber).set({
+        'assignedTo': null,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (e, st) {
+      errorCenter.report(
+        AppError(
+          userMessage: 'Impossible de libérer la table.',
+          error: e,
+          stackTrace: st,
+        ),
+      );
+    }
+  }
+
   // Jour
   double _dailyTotal = 0.0;
-  double get dailyTotal => _dailyTotal;
+  double get dailyTotal {
+    if (role == UserRole.manager) return _dailyTotal;
+    double sum = 0.0;
+    for (final e in _journalToday) {
+      sum += (e['total'] as num?)?.toDouble() ?? 0.0;
+    }
+    return sum;
+  }
 
   // Historique 'yyyy-MM-dd' -> total
   final Map<String, double> _historyTotals = {};
@@ -440,6 +493,7 @@ class RestaurantState extends ChangeNotifier {
       }, onError: _onStreamError);
 
       // 2) Tables (temps réel)
+      // 2) Tables (temps réel) — tous rôles voient toutes les tables
       _tablesSub = _tablesCol.snapshots().listen((qs) {
         final existing = <int, TableOrder>{};
         for (final d in qs.docs) {
@@ -449,12 +503,8 @@ class RestaurantState extends ChangeNotifier {
 
           final rawItems = (data['items'] as List?) ?? const [];
           final items = <OrderItem>[];
-
           for (final m in rawItems) {
-            // Cast each list element to a proper typed map
-
             final itemMap = (m as Map).cast<String, dynamic>();
-
             items.add(
               OrderItem(
                 dish: Dish(
@@ -467,34 +517,51 @@ class RestaurantState extends ChangeNotifier {
             );
           }
 
-          if (tableNo > 0)
+          if (tableNo > 0) {
             existing[tableNo] = TableOrder(tableNumber: tableNo, items: items);
+          }
         }
+
+        // Toujours afficher la grille 1..tableCount, même si des docs manquent
         _tables = List.generate(_tableCount, (i) {
           final tn = i + 1;
           return existing[tn] ?? TableOrder(tableNumber: tn);
         });
+
         notifyListeners();
       }, onError: _onStreamError);
 
+      // 3) Aujourd’hui (total + journal)
       // 3) Aujourd’hui (total + journal)
       await _ensureTodayDocExists();
       final dayKey = _todayKey();
       final todayDoc = _daysCol.doc(dayKey);
 
-      _todaySub = todayDoc.snapshots().listen((doc) {
-        _dailyTotal = (doc.data()?['total'] as num?)?.toDouble() ?? 0.0;
+      // Manager : lit le doc du jour (total global)
+      if (role == UserRole.manager) {
+        _todaySub = todayDoc.snapshots().listen((doc) {
+          _dailyTotal = (doc.data()?['total'] as num?)?.toDouble() ?? 0.0;
+          notifyListeners();
+        }, onError: _onStreamError);
+      } else {
+        // Serveur : ne lit pas le doc (pas de droit de lecture) ; _dailyTotal = somme de _journalToday via getter
+        _dailyTotal = 0.0;
+      }
+
+      // Journal (manager = tout ; serveur = filtré par son uid)
+      Query<Map<String, dynamic>> jq = todayDoc
+          .collection('journal')
+          .orderBy('ts');
+      if (role == UserRole.server) {
+        jq = todayDoc
+            .collection('journal')
+            .where('serverUid', isEqualTo: currentUid)
+            .orderBy('ts');
+      }
+      _todayJournalSub = jq.snapshots().listen((qs) {
+        _journalToday = qs.docs.map((d) => d.data()).toList();
         notifyListeners();
       }, onError: _onStreamError);
-
-      _todayJournalSub = todayDoc
-          .collection('journal')
-          .orderBy('ts')
-          .snapshots()
-          .listen((qs) {
-            _journalToday = qs.docs.map((d) => d.data()).toList();
-            notifyListeners();
-          }, onError: _onStreamError);
 
       // 4) Historique (90 jours)
       _historySub = _daysCol
@@ -696,11 +763,24 @@ class RestaurantState extends ChangeNotifier {
   Future<void> setTableCount(int newCount) async {
     if (newCount <= 0) return;
     try {
+      final prev = _tableCount;
       _tableCount = newCount;
+
       await _restaurantDoc.set({
         'tablesCount': newCount,
         'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
+
+      // Nettoie les docs Firestore des tables au-delà du nouveau max
+      if (newCount < prev) {
+        for (int n = newCount + 1; n <= prev; n++) {
+          await _tableDoc(n).set({
+            'items': [],
+            'updatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+        }
+      }
+
       _tables = List.generate(
         _tableCount,
         (i) => TableOrder(tableNumber: i + 1),
@@ -724,40 +804,81 @@ class RestaurantState extends ChangeNotifier {
   DocumentReference<Map<String, dynamic>> _tableDoc(int tableNumber) =>
       _tablesCol.doc('$tableNumber');
 
-  Future<void> _writeTableItems(int tableNumber, List<OrderItem> items) async {
-    await _tableDoc(tableNumber).set({
-      'tableNumber': tableNumber,
-      'items': items
-          .map(
-            (it) => {
-              'dishId': it.dish.id,
-              'name': it.dish.name,
-              'price': it.dish.price,
-              'qty': it.quantity,
-            },
-          )
-          .toList(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+  Future<void> _mutateTableItemsTransactional({
+    required int tableNumber,
+    required List<Map<String, dynamic>>
+    deltas, // [{dishId, name, price, deltaQty}] ; deltaQty peut être négatif
+    bool replaceAllWithEmpty = false, // pour clear()
+  }) async {
+    final ref = _tableDoc(tableNumber);
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(ref);
+      final data = Map<String, dynamic>.from(snap.data() ?? {});
+      final raw =
+          (data['items'] as List?)
+              ?.map((e) => Map<String, dynamic>.from(e))
+              .toList() ??
+          <Map<String, dynamic>>[];
+
+      final byId = <String, Map<String, dynamic>>{
+        for (final m in raw) (m['dishId'] ?? '') as String: m,
+      };
+
+      if (replaceAllWithEmpty) {
+        byId.clear();
+      } else {
+        for (final d in deltas) {
+          final id = (d['dishId'] ?? '') as String;
+          if (id.isEmpty) continue;
+          final name = d['name'] as String? ?? '';
+          final price = (d['price'] is num)
+              ? (d['price'] as num).toDouble()
+              : double.tryParse('${d['price']}'.replaceAll(',', '.')) ?? 0.0;
+          final delta = (d['deltaQty'] as num?)?.toInt() ?? 0;
+
+          final existing = byId[id];
+          final currentQty = (existing?['qty'] as num?)?.toInt() ?? 0;
+          final newQty = currentQty + delta;
+
+          if (newQty <= 0) {
+            byId.remove(id);
+          } else {
+            byId[id] = {
+              'dishId': id,
+              'name': name.isEmpty ? (existing?['name'] ?? '') : name,
+              'price': existing?['price'] ?? price,
+              'qty': newQty,
+            };
+          }
+        }
+      }
+
+      tx.set(ref, {
+        'tableNumber': tableNumber,
+        'items': byId.values.toList(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    });
   }
 
-  void addDishToTable(int tableNumber, Dish dish, {int quantity = 1}) {
-    final table = _findTable(tableNumber);
-    if (table == null) {
-      errorCenter.report(AppError(userMessage: 'Table introuvable.'));
-      return;
-    }
+  Future<void> addDishToTable(
+    int tableNumber,
+    Dish dish, {
+    int quantity = 1,
+  }) async {
+    if (quantity <= 0) return;
     try {
-      final existing = table.items.firstWhereOrNull(
-        (it) => it.dish.id == dish.id,
+      await _mutateTableItemsTransactional(
+        tableNumber: tableNumber, // <= ICI
+        deltas: [
+          {
+            'dishId': dish.id,
+            'name': dish.name,
+            'price': dish.price,
+            'deltaQty': quantity,
+          },
+        ],
       );
-      if (existing != null) {
-        existing.quantity += quantity;
-      } else {
-        table.items.add(OrderItem(dish: dish, quantity: quantity));
-      }
-      notifyListeners();
-      _writeTableItems(tableNumber, table.items);
     } catch (e, st) {
       errorCenter.report(
         AppError(
@@ -769,23 +890,29 @@ class RestaurantState extends ChangeNotifier {
     }
   }
 
-  void setItemQuantity(int tableNumber, Dish dish, int quantity) {
-    final table = _findTable(tableNumber);
-    if (table == null) {
-      errorCenter.report(AppError(userMessage: 'Table introuvable.'));
-      return;
-    }
+  Future<void> setItemQuantity(int tableNumber, Dish dish, int quantity) async {
+    if (quantity < 0) quantity = 0;
     try {
-      final idx = table.items.indexWhere((it) => it.dish.id == dish.id);
-      if (idx >= 0) {
-        if (quantity <= 0) {
-          table.items.removeAt(idx);
-        } else {
-          table.items[idx].quantity = quantity;
-        }
-        notifyListeners();
-        _writeTableItems(tableNumber, table.items);
-      }
+      final table = _findTable(tableNumber);
+      final currentQty =
+          table?.items
+              .firstWhereOrNull((it) => it.dish.id == dish.id)
+              ?.quantity ??
+          0;
+      final delta = quantity - currentQty;
+      if (delta == 0) return;
+
+      await _mutateTableItemsTransactional(
+        tableNumber: tableNumber, // <= ICI
+        deltas: [
+          {
+            'dishId': dish.id,
+            'name': dish.name,
+            'price': dish.price,
+            'deltaQty': delta,
+          },
+        ],
+      );
     } catch (e, st) {
       errorCenter.report(
         AppError(
@@ -797,16 +924,27 @@ class RestaurantState extends ChangeNotifier {
     }
   }
 
-  void removeItem(int tableNumber, Dish dish) {
-    final table = _findTable(tableNumber);
-    if (table == null) {
-      errorCenter.report(AppError(userMessage: 'Table introuvable.'));
-      return;
-    }
+  Future<void> removeItem(int tableNumber, Dish dish) async {
     try {
-      table.items.removeWhere((it) => it.dish.id == dish.id);
-      notifyListeners();
-      _writeTableItems(tableNumber, table.items);
+      final table = _findTable(tableNumber);
+      final currentQty =
+          table?.items
+              .firstWhereOrNull((it) => it.dish.id == dish.id)
+              ?.quantity ??
+          0;
+      if (currentQty == 0) return;
+
+      await _mutateTableItemsTransactional(
+        tableNumber: tableNumber, // <= ICI
+        deltas: [
+          {
+            'dishId': dish.id,
+            'name': dish.name,
+            'price': dish.price,
+            'deltaQty': -currentQty,
+          },
+        ],
+      );
     } catch (e, st) {
       errorCenter.report(
         AppError(
@@ -818,16 +956,13 @@ class RestaurantState extends ChangeNotifier {
     }
   }
 
-  void clearTable(int tableNumber) {
-    final table = _findTable(tableNumber);
-    if (table == null) {
-      errorCenter.report(AppError(userMessage: 'Table introuvable.'));
-      return;
-    }
+  Future<void> clearTable(int tableNumber) async {
     try {
-      table.clear();
-      notifyListeners();
-      _writeTableItems(tableNumber, table.items);
+      await _mutateTableItemsTransactional(
+        tableNumber: tableNumber, // <= ICI
+        deltas: const [],
+        replaceAllWithEmpty: true,
+      );
     } catch (e, st) {
       errorCenter.report(
         AppError(
@@ -839,67 +974,87 @@ class RestaurantState extends ChangeNotifier {
     }
   }
 
-  double closeTableAndAddToDaily(int tableNumber) {
-    final table = _findTable(tableNumber);
-    if (table == null) {
-      errorCenter.report(AppError(userMessage: 'Table introuvable.'));
-      return 0.0;
-    }
-    try {
-      final amount = table.total;
-      final dayKey = _todayKey();
-      final todayDoc = _daysCol.doc(dayKey);
-      final journalCol = todayDoc.collection('journal');
-
-      _db.runTransaction((tx) async {
-        // 1) total jour
-        tx.set(todayDoc, {
-          'total': FieldValue.increment(amount),
-          'tz': 'Europe/Madrid',
-        }, SetOptions(merge: true));
-
-        // 2) journal
-        for (final it in table.items) {
-          tx.set(journalCol.doc(), {
-            'ts': FieldValue.serverTimestamp(),
-            'table': tableNumber,
-            'dishId': it.dish.id,
-            'name': it.dish.name,
-            'price': it.dish.price,
-            'qty': it.quantity,
-            'total': it.lineTotal,
-          });
-        }
-
-        // 3) vider la table
-        tx.set(_tableDoc(tableNumber), {
-          'items': [],
-          'updatedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
-      });
-
-      table.clear();
-      notifyListeners();
-      return amount;
-    } catch (e, st) {
-      errorCenter.report(
-        AppError(
-          userMessage: 'Impossible de fermer la table.',
-          error: e,
-          stackTrace: st,
-        ),
-      );
-      return 0.0;
-    }
+Future<double> closeTableAndAddToDaily(int tableNumber) async {
+  final table = _findTable(tableNumber);
+  if (table == null) {
+    errorCenter.report(AppError(userMessage: 'Table introuvable.'));
+    return 0.0;
   }
 
-  void closeAllOpenTablesToDaily() {
+  try {
+    final amount = table.total;
+    final dayKey = _todayKey();
+    final todayDoc = _daysCol.doc(dayKey);
+    final journalCol = todayDoc.collection('journal');
+
+    await _db.runTransaction((tx) async {
+      // 1) total global (manager)
+      tx.set(todayDoc, {
+        'total': FieldValue.increment(amount),
+        'tz': 'Europe/Madrid',
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      // 2) lignes du journal (TOUJOURS avec serverUid)
+      for (final it in table.items) {
+        tx.set(journalCol.doc(), {
+          'ts': FieldValue.serverTimestamp(),
+          'table': tableNumber,
+          'dishId': it.dish.id,
+          'name': it.dish.name,
+          'price': it.dish.price,
+          'qty': it.quantity,
+          'total': it.lineTotal,
+          'serverUid': currentUid,
+        });
+      }
+
+      // 3) vider la table
+      tx.set(_tableDoc(tableNumber), {
+        'items': [],
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    });
+
+    // 🔸 Miroir local immédiat pour les serveurs
+    if (role == UserRole.server) {
+      final nowTs = Timestamp.now();
+      for (final it in table.items) {
+        _journalToday.add({
+          'ts': nowTs,
+          'table': tableNumber,
+          'dishId': it.dish.id,
+          'name': it.dish.name,
+          'price': it.dish.price,
+          'qty': it.quantity,
+          'total': it.lineTotal,
+          'serverUid': currentUid,
+        });
+      }
+    }
+
+    table.clear();
+    notifyListeners();
+    return amount;
+  } catch (e, st) {
+    errorCenter.report(AppError(
+      userMessage: 'Impossible de fermer la table.',
+      error: e,
+      stackTrace: st,
+    ));
+    return 0.0;
+  }
+}
+
+
+
+  Future<void> closeAllOpenTablesToDaily() async {
     try {
       final dayKey = _todayKey();
       final todayDoc = _daysCol.doc(dayKey);
       final journalCol = todayDoc.collection('journal');
 
-      _db.runTransaction((tx) async {
+      await _db.runTransaction((tx) async {
         double add = 0.0;
         for (final t in _tables) {
           if (t.items.isEmpty) continue;
@@ -912,6 +1067,7 @@ class RestaurantState extends ChangeNotifier {
               'price': it.dish.price,
               'qty': it.quantity,
               'total': it.lineTotal,
+              'serverUid': currentUid,
             });
           }
           add += t.total;
@@ -924,6 +1080,7 @@ class RestaurantState extends ChangeNotifier {
           tx.set(todayDoc, {
             'total': FieldValue.increment(add),
             'tz': 'Europe/Madrid',
+            'updatedAt': FieldValue.serverTimestamp(),
           }, SetOptions(merge: true));
         }
       });
@@ -943,57 +1100,56 @@ class RestaurantState extends ChangeNotifier {
     }
   }
 
-  void resetDailyTotal({bool keepHistory = true}) {
+  Future<void> resetDailyTotal({bool keepHistory = true}) async {
     try {
       final todayRef = _daysCol.doc(_todayKey());
 
       if (keepHistory) {
-        // 1) Déplacer le journal vers journal_archive (au lieu de supprimer)
-        todayRef.collection('journal').get().then((qs) async {
-          if (qs.docs.isNotEmpty) {
-            final batch = _db.batch();
-            for (final d in qs.docs) {
-              final data = d.data();
-              final archRef = todayRef.collection('journal_archive').doc(d.id);
-              batch.set(archRef, {
-                ...data,
-                'archivedAt': FieldValue.serverTimestamp(),
-              });
-              batch.delete(d.reference);
-            }
-            await batch.commit();
+        // 1) Déplacer le journal vers journal_archive
+        final qs = await todayRef.collection('journal').get();
+        if (qs.docs.isNotEmpty) {
+          final batch = _db.batch();
+          for (final d in qs.docs) {
+            final data = d.data();
+            final archRef = todayRef.collection('journal_archive').doc(d.id);
+            batch.set(archRef, {
+              ...data,
+              'archivedAt': FieldValue.serverTimestamp(),
+            });
+            batch.delete(d.reference);
           }
-        });
-
-        // 2) Vider les tables ouvertes (local + Firestore)
-        for (final t in _tables) {
-          t.clear();
-          _tableDoc(t.tableNumber).set({
-            'items': [],
-            'updatedAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
+          await batch.commit();
         }
 
-        // 3) État local
+        // 2) Vider les tables ouvertes (local + Firestore) -> via transaction “clear”
+        for (final t in _tables) {
+          await _mutateTableItemsTransactional(
+            tableNumber: t.tableNumber,
+            deltas: const [],
+            replaceAllWithEmpty: true,
+          );
+        }
+
+        // 3) État local minimal (sera remplacé par les streams)
         _journalToday = [];
         notifyListeners();
         return;
       }
 
-      // --- "hard reset" (optionnel) : remet aussi total à 0 ---
-      todayRef.set({'total': 0.0}, SetOptions(merge: true));
-      todayRef.collection('journal').get().then((qs) async {
-        if (qs.docs.isEmpty) return;
+      // --- Hard reset (inclut total = 0) ---
+      await todayRef.set({'total': 0.0}, SetOptions(merge: true));
+      final qs = await todayRef.collection('journal').get();
+      if (qs.docs.isNotEmpty) {
         final batch = _db.batch();
         for (final d in qs.docs) batch.delete(d.reference);
         await batch.commit();
-      });
+      }
       for (final t in _tables) {
-        t.clear();
-        _tableDoc(t.tableNumber).set({
-          'items': [],
-          'updatedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
+        await _mutateTableItemsTransactional(
+          tableNumber: t.tableNumber,
+          deltas: const [],
+          replaceAllWithEmpty: true,
+        );
       }
       _dailyTotal = 0.0;
       _journalToday = [];
@@ -1217,48 +1373,250 @@ class RestaurantState extends ChangeNotifier {
     }
   }
 
-  // ---------- Minuit ----------
-  void _scheduleMidnightTick() {
-    _midnightTimer?.cancel();
+  Future<void> exportInvoicePdfForDay(String dayKey) async {
+    try {
+      final baseFont = await PdfGoogleFonts.robotoRegular();
+      final boldFont = await PdfGoogleFonts.robotoBold();
 
-    final now = DateTime.now();
-    final nextMidnight = DateTime(
-      now.year,
-      now.month,
-      now.day,
-    ).add(const Duration(days: 1));
+      final doc = pw.Document();
 
-    _midnightTimer = Timer(
-      nextMidnight.difference(now) + const Duration(seconds: 1),
-      () async {
+      // Libellé de date lisible
+      final date = DateTime.tryParse(dayKey);
+      final dateLabel = date == null
+          ? dayKey
+          : DateFormat('EEEE d MMMM y', 'fr_FR').format(date);
+
+      // --- Récupération des lignes ---
+      final dayRef = _daysCol.doc(dayKey);
+
+      // Manager : toutes les lignes ; Serveur : seulement ses lignes
+      Query<Map<String, dynamic>> q = dayRef
+          .collection('journal')
+          .orderBy('ts');
+      if (role == UserRole.server) {
+        q = dayRef
+            .collection('journal')
+            .where('serverUid', isEqualTo: currentUid)
+            .orderBy('ts');
+      }
+
+      List<Map<String, dynamic>> lines = [];
+      try {
+        final jrSnap = await q.get();
+        if (jrSnap.docs.isNotEmpty) {
+          lines = jrSnap.docs.map((d) => d.data()).toList();
+        } else {
+          // si journal vide, on tente l'archive (manager = toutes, serveur = ses lignes)
+          Query<Map<String, dynamic>> qa = dayRef
+              .collection('journal_archive')
+              .orderBy('ts');
+          if (role == UserRole.server) {
+            qa = dayRef
+                .collection('journal_archive')
+                .where('serverUid', isEqualTo: currentUid)
+                .orderBy('ts');
+          }
+          final archSnap = await qa.get();
+          lines = archSnap.docs.map((d) => d.data()).toList();
+        }
+      } catch (_) {
+        // si une lecture échoue, on continue avec 0 ligne
+      }
+
+      // --- Calcul du total ---
+      // Manager : on essaie d'afficher le total global ; Serveur : total personnel uniquement
+      double totalJour = 0.0;
+      if (role == UserRole.manager) {
         try {
-          // ⬅️ crée le doc du NOUVEAU jour s'il n'existe pas (total = 0)
-          await _ensureTodayDocExists();
-        } catch (_) {}
+          final daySnap = await dayRef.get();
+          totalJour = (daySnap.data()?['total'] as num?)?.toDouble() ?? 0.0;
+        } catch (_) {
+          // fallback : somme des lignes si le doc n'est pas dispo
+          for (final e in lines) {
+            totalJour += (e['total'] as num?)?.toDouble() ?? 0.0;
+          }
+        }
+      } else {
+        // Serveur → total personnel = somme des lignes filtrées
+        for (final e in lines) {
+          totalJour += (e['total'] as num?)?.toDouble() ?? 0.0;
+        }
+      }
 
-        _todaySub?.cancel();
-        _todayJournalSub?.cancel();
+      // --- Table PDF ---
+      List<List<String>> rows = lines.map((e) {
+        final t = '${e['table']}';
+        final nm = '${e['name']}';
+        final qte = '${e['qty']}';
+        final p = (e['price'] as num?)?.toDouble() ?? 0.0;
+        final tot = (e['total'] as num?)?.toDouble() ?? 0.0;
+        return [t, nm, qte, _fmt(p), _fmt(tot)];
+      }).toList();
 
-        final todayDoc = _daysCol.doc(_todayKey());
+      doc.addPage(
+        pw.MultiPage(
+          pageTheme: const pw.PageTheme(margin: pw.EdgeInsets.all(32)),
+          build: (context) => [
+            pw.Header(
+              level: 0,
+              child: pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text(
+                        _brandName,
+                        style: pw.TextStyle(font: boldFont, fontSize: 24),
+                      ),
+                      pw.Text(
+                        role == UserRole.manager
+                            ? 'Facture — $dateLabel'
+                            : 'Mes ventes — $dateLabel',
+                        style: pw.TextStyle(font: baseFont, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                  pw.Text(
+                    'Total: ${_fmt(totalJour)}',
+                    style: pw.TextStyle(font: boldFont, fontSize: 18),
+                  ),
+                ],
+              ),
+            ),
+            if (rows.isEmpty)
+              pw.Padding(
+                padding: const pw.EdgeInsets.only(top: 40),
+                child: pw.Text(
+                  totalJour > 0
+                      ? 'Impression du total uniquement.'
+                      : (role == UserRole.manager
+                            ? 'Aucune vente enregistrée ce jour-là.'
+                            : 'Aucune vente enregistrée pour votre compte ce jour-là.'),
+                  style: pw.TextStyle(font: baseFont, fontSize: 14),
+                ),
+              )
+            else
+              pw.Table.fromTextArray(
+                headers: ['Table', 'Article', 'Qté', 'Prix', 'Total'],
+                data: rows,
+                headerStyle: pw.TextStyle(font: boldFont),
+                headerDecoration: pw.BoxDecoration(
+                  color: pdf.PdfColors.grey300,
+                ),
+                cellAlignment: pw.Alignment.centerLeft,
+                cellStyle: pw.TextStyle(font: baseFont, fontSize: 11),
+                columnWidths: {
+                  0: const pw.FixedColumnWidth(50),
+                  1: const pw.FlexColumnWidth(),
+                  2: const pw.FixedColumnWidth(40),
+                  3: const pw.FixedColumnWidth(60),
+                  4: const pw.FixedColumnWidth(70),
+                },
+              ),
+            pw.SizedBox(height: 12),
+            pw.Align(
+              alignment: pw.Alignment.centerRight,
+              child: pw.Container(
+                padding: const pw.EdgeInsets.all(8),
+                decoration: pw.BoxDecoration(
+                  border: pw.Border.all(
+                    color: pdf.PdfColor.fromInt(0xFFCCCCCC),
+                  ),
+                ),
+                child: pw.Text(
+                  (role == UserRole.manager
+                      ? 'TOTAL JOUR: ${_fmt(totalJour)}'
+                      : 'MON TOTAL: ${_fmt(totalJour)}'),
+                  style: pw.TextStyle(font: boldFont, fontSize: 14),
+                ),
+              ),
+            ),
+            pw.SizedBox(height: 24),
+            pw.Text(
+              'Référence: $dayKey • Généré via ${_brandName}',
+              style: pw.TextStyle(font: baseFont),
+            ),
+          ],
+        ),
+      );
 
+      final bytes = await doc.save();
+      if (kIsWeb) {
+        await Printing.layoutPdf(onLayout: (_) async => bytes);
+      } else {
+        await Printing.sharePdf(bytes: bytes, filename: 'Facture_$dayKey.pdf');
+      }
+    } catch (e, st) {
+      final ctx = navigatorKey.currentContext;
+      if (ctx != null) {
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(
+            content: Text(
+              'PDF: ${e is FlutterError ? e.message : e.toString()}',
+            ),
+          ),
+        );
+      }
+      errorCenter.report(
+        AppError(
+          userMessage: 'Le PDF n’a pas pu être généré ou partagé.',
+          error: e,
+          stackTrace: st,
+          onRetry: () => exportInvoicePdfForDay(dayKey),
+        ),
+      );
+    }
+  }
+
+  // ---------- Minuit ----------
+void _scheduleMidnightTick() {
+  _midnightTimer?.cancel();
+
+  final now = DateTime.now();
+  final nextMidnight = DateTime(now.year, now.month, now.day)
+      .add(const Duration(days: 1));
+
+  _midnightTimer = Timer(
+    nextMidnight.difference(now) + const Duration(seconds: 1),
+    () async {
+      try {
+        await _ensureTodayDocExists();
+      } catch (_) {}
+
+      _todaySub?.cancel();
+      _todayJournalSub?.cancel();
+
+      final todayDoc = _daysCol.doc(_todayKey());
+
+      // Manager: lit le total global ; Serveur: pas de lecture du doc jour
+      if (role == UserRole.manager) {
         _todaySub = todayDoc.snapshots().listen((doc) {
           _dailyTotal = (doc.data()?['total'] as num?)?.toDouble() ?? 0.0;
           notifyListeners();
         }, onError: _onStreamError);
+      } else {
+        _dailyTotal = 0.0; // le total serveur = somme(_journalToday)
+      }
 
-        _todayJournalSub = todayDoc
-            .collection('journal')
-            .orderBy('ts')
-            .snapshots()
-            .listen((qs) {
-              _journalToday = qs.docs.map((d) => d.data()).toList();
-              notifyListeners();
-            }, onError: _onStreamError);
+      // Journal: manager = tout ; serveur = filtré par son uid
+      Query<Map<String, dynamic>> jq = todayDoc.collection('journal').orderBy('ts');
+      if (role == UserRole.server) {
+        jq = todayDoc.collection('journal')
+            .where('serverUid', isEqualTo: currentUid)
+            .orderBy('ts');
+      }
+      _todayJournalSub = jq.snapshots().listen((qs) {
+        _journalToday = qs.docs.map((d) => d.data()).toList();
+        notifyListeners();
+      }, onError: _onStreamError);
 
-        _scheduleMidnightTick();
-      },
-    );
-  }
+      _scheduleMidnightTick();
+    },
+  );
+}
+
+
 
   // ---------- Utils ----------
   static String _id() => DateTime.now().microsecondsSinceEpoch.toString();
@@ -1331,10 +1689,18 @@ class _AuthGate extends StatelessWidget {
             }
 
             final ec = context.read<ErrorCenter>();
+            final roleStr = (data['role'] as String?) ?? 'server';
+            final role = roleStr == 'manager'
+                ? UserRole.manager
+                : UserRole.server;
+
             return ChangeNotifierProvider(
-              create: (_) =>
-                  RestaurantState(errorCenter: ec, restaurantId: restaurantId)
-                    ..init(),
+              create: (_) => RestaurantState(
+                errorCenter: ec,
+                restaurantId: restaurantId,
+                currentUid: user.uid,
+                role: role,
+              )..init(),
               child: const RootScreen(),
             );
           },
@@ -1367,18 +1733,58 @@ class _RootScreenState extends State<RootScreen> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
+    final isManager = state.role == UserRole.manager;
+
+    // Manager: 4 onglets. Serveur: PAS d'historique, mais a Menu & Tables
+    final pages = isManager
+        ? const [
+            OrdersSinglePage(),
+            DailyScreen(),
+            HistoryScreen(),
+            MenuAndTablesScreen(),
+          ]
+        : const [OrdersSinglePage(), DailyScreen(), MenuAndTablesScreen()];
+
+    final destinations = isManager
+        ? const [
+            NavigationDestination(
+              icon: Icon(Icons.table_restaurant),
+              label: 'Commandes',
+            ),
+            NavigationDestination(icon: Icon(Icons.today), label: 'Jour'),
+            NavigationDestination(
+              icon: Icon(Icons.history),
+              label: 'Historique',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.restaurant_menu),
+              label: 'Menu & Tables',
+            ),
+          ]
+        : const [
+            NavigationDestination(
+              icon: Icon(Icons.table_restaurant),
+              label: 'Commandes',
+            ),
+            NavigationDestination(icon: Icon(Icons.today), label: 'Jour'),
+            NavigationDestination(
+              icon: Icon(Icons.restaurant_menu),
+              label: 'Menu & Tables',
+            ),
+          ];
+
+    if (_index >= pages.length) _index = 0;
+
     return Scaffold(
       appBar: FancyBrandBar(
-        // (optionnel) tu peux passer un autre titre/logo :
-        // title: 'Mon Resto',
-        // logoAsset: 'assets/mon_logo.png',
         actions: [
-          IconButton(
-            tooltip: 'PDF du jour',
-            onPressed: () =>
-                context.read<RestaurantState>().exportDailyInvoicePdf(),
-            icon: const Icon(Icons.picture_as_pdf, color: Colors.white),
-          ),
+          if (isManager) // 👈 le serveur ne voit pas le bouton PDF global
+            IconButton(
+              tooltip: 'PDF du jour',
+              onPressed: () =>
+                  context.read<RestaurantState>().exportDailyInvoicePdf(),
+              icon: const Icon(Icons.picture_as_pdf, color: Colors.white),
+            ),
           IconButton(
             tooltip: 'Se déconnecter',
             onPressed: () => FirebaseAuth.instance.signOut(),
@@ -1386,30 +1792,11 @@ class _RootScreenState extends State<RootScreen> {
           ),
         ],
       ),
-
-      body: SafeArea(
-        child: Column(
-          children: [
-            // Uncomment if you want the global error banner again:
-            Expanded(child: _pages[_index]),
-          ],
-        ),
-      ),
+      body: SafeArea(child: pages[_index]),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.table_restaurant),
-            label: 'Commandes',
-          ),
-          NavigationDestination(icon: Icon(Icons.today), label: 'Jour'),
-          NavigationDestination(icon: Icon(Icons.history), label: 'Historique'),
-          NavigationDestination(
-            icon: Icon(Icons.restaurant_menu),
-            label: 'Menu & Tables',
-          ),
-        ],
+        destinations: destinations,
       ),
     );
   }
@@ -1499,7 +1886,8 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                             final idx = state.tables.indexWhere(
                               (t) => t.tableNumber == v,
                             );
-                            if (idx >= 0) setState(() => _selectedTableIndex = idx);
+                            if (idx >= 0)
+                              setState(() => _selectedTableIndex = idx);
                           },
                         ),
                       ),
@@ -1515,15 +1903,18 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                               vertical: 6,
                             ),
                             decoration: BoxDecoration(
-                              color: (table.items.isNotEmpty
-                                      ? Colors.green
-                                      : Colors.grey)
-                                  .withOpacity(0.12),
+                              color:
+                                  (table.items.isNotEmpty
+                                          ? Colors.green
+                                          : Colors.grey)
+                                      .withOpacity(0.12),
                               borderRadius: BorderRadius.circular(999),
                             ),
                             child: Text(
                               table.items.isNotEmpty ? 'Ouverte' : 'Vide',
-                              style: const TextStyle(fontWeight: FontWeight.w600),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
                         ),
@@ -1537,7 +1928,9 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                           children: [
                             Text(
                               'Sous-total: ${_fmt(table.total)}',
-                              style: const TextStyle(fontWeight: FontWeight.w700),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                             Text(
                               'Total jour: ${_fmt(state.dailyTotal)}',
@@ -1652,16 +2045,21 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                                   dish: it.dish,
                                   quantity: it.quantity,
                                 );
-                                context
-                                    .read<RestaurantState>()
-                                    .removeItem(table.tableNumber, it.dish);
+                                context.read<RestaurantState>().removeItem(
+                                  table.tableNumber,
+                                  it.dish,
+                                );
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(
-                                    content: Text('Supprimé ${removed.dish.name}'),
+                                    content: Text(
+                                      'Supprimé ${removed.dish.name}',
+                                    ),
                                     action: SnackBarAction(
                                       label: 'Annuler',
                                       onPressed: () {
-                                        context.read<RestaurantState>().addDishToTable(
+                                        context
+                                            .read<RestaurantState>()
+                                            .addDishToTable(
                                               table.tableNumber,
                                               removed.dish,
                                               quantity: removed.quantity,
@@ -1677,7 +2075,9 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                             child: ListTile(
                               title: Text(
                                 it.dish.name,
-                                style: const TextStyle(fontWeight: FontWeight.w600),
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                               subtitle: Text('${_fmt(it.dish.price)} / unité'),
                               trailing: ConstrainedBox(
@@ -1696,7 +2096,9 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                                             it.dish,
                                             it.quantity - 1,
                                           ),
-                                      icon: const Icon(Icons.remove_circle_outline),
+                                      icon: const Icon(
+                                        Icons.remove_circle_outline,
+                                      ),
                                     ),
                                     SizedBox(
                                       width: 32,
@@ -1704,7 +2106,8 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                                         child: Text(
                                           '${it.quantity}',
                                           style: const TextStyle(
-                                              fontWeight: FontWeight.w700),
+                                            fontWeight: FontWeight.w700,
+                                          ),
                                         ),
                                       ),
                                     ),
@@ -1717,7 +2120,9 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                                             it.dish,
                                             it.quantity + 1,
                                           ),
-                                      icon: const Icon(Icons.add_circle_outline),
+                                      icon: const Icon(
+                                        Icons.add_circle_outline,
+                                      ),
                                     ),
                                     const SizedBox(width: 6),
                                     Flexible(
@@ -1746,9 +2151,9 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                     child: OutlinedButton.icon(
                       onPressed: table.items.isEmpty
                           ? null
-                          : () => context
-                              .read<RestaurantState>()
-                              .clearTable(table.tableNumber),
+                          : () => context.read<RestaurantState>().clearTable(
+                              table.tableNumber,
+                            ),
                       icon: const Icon(Icons.clear_all),
                       label: const Text('Vider la table'),
                     ),
@@ -1756,20 +2161,18 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: table.items.isEmpty
-                          ? null
-                          : () {
-                              final added = context
-                                  .read<RestaurantState>()
-                                  .closeTableAndAddToDaily(table.tableNumber);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    'Table ${table.tableNumber} fermée. +${_fmt(added)} aujourd’hui.',
-                                  ),
-                                ),
-                              );
-                            },
+                      onPressed: () async {
+                        final added = await context
+                            .read<RestaurantState>()
+                            .closeTableAndAddToDaily(table.tableNumber);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'Table ${table.tableNumber} fermée. +${_fmt(added)} aujourd’hui.',
+                            ),
+                          ),
+                        );
+                      },
                       icon: const Icon(Icons.point_of_sale),
                       label: const Text('Fermer & Ajouter au jour'),
                     ),
@@ -1779,11 +2182,28 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
               const SizedBox(height: 8),
               SizedBox(
                 width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: () =>
-                      context.read<RestaurantState>().exportDailyInvoicePdf(),
-                  icon: const Icon(Icons.picture_as_pdf),
-                  label: const Text('PDF du jour'),
+                child: Builder(
+                  builder: (context) {
+                    final isManager =
+                        context.read<RestaurantState>().role ==
+                        UserRole.manager;
+                    return FilledButton.icon(
+                      onPressed: () {
+                        final st = context.read<RestaurantState>();
+                        if (isManager) {
+                          st.exportDailyInvoicePdf();
+                        } else {
+                          st.exportInvoicePdfForDay(
+                            st.todayKey,
+                          ); // PDF perso (serveur)
+                        }
+                      },
+                      icon: const Icon(Icons.picture_as_pdf),
+                      label: Text(
+                        isManager ? 'PDF du jour' : 'Mon PDF du jour',
+                      ),
+                    );
+                  },
                 ),
               ),
             ],
@@ -1887,10 +2307,7 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
       children: [
         const Icon(Icons.confirmation_number_outlined),
         const SizedBox(width: 12),
-        const Text(
-          'Qté',
-          style: TextStyle(fontWeight: FontWeight.w600),
-        ),
+        const Text('Qté', style: TextStyle(fontWeight: FontWeight.w600)),
         const SizedBox(width: 12),
         Container(
           decoration: BoxDecoration(
@@ -1955,10 +2372,10 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
         // plus de validation de champ quantité — c’est un entier contrôlé
         try {
           context.read<RestaurantState>().addDishToTable(
-                state.tables[_selectedTableIndex].tableNumber,
-                _dish!,
-                quantity: qty,
-              );
+            state.tables[_selectedTableIndex].tableNumber,
+            _dish!,
+            quantity: qty,
+          );
           setState(() => qty = 1); // reset si tu veux
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Ajouté: ${_dish!.name} ×$qty')),
@@ -2008,7 +2425,6 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
     }
   }
 }
-
 
 // Swipe bg
 class _SwipeBg extends StatelessWidget {
@@ -2090,9 +2506,10 @@ class DailyScreen extends StatelessWidget {
                         onPressed:
                             state.dailyTotal == 0 && state.journalToday.isEmpty
                             ? null
-                            : () {
-                                // ✅ vide le journal + tables ouvertes, conserve le total du jour
-                                state.resetDailyTotal(keepHistory: true);
+                            : () async {
+                                await state.resetDailyTotal(keepHistory: true);
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).clearSnackBars();
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                     content: Text(
@@ -2101,6 +2518,7 @@ class DailyScreen extends StatelessWidget {
                                   ),
                                 );
                               },
+
                         icon: const Icon(Icons.refresh),
                         // tu peux garder le label d’origine si tu veux
                         label: const Text('Reset jour'),
@@ -2126,18 +2544,18 @@ class DailyScreen extends StatelessWidget {
                         label: const Text('Fermer toutes les tables'),
                       );
 
-                      final pdfBtn = FilledButton.icon(
-                        style: isPhone
-                            ? FilledButton.styleFrom(
-                                minimumSize: const Size.fromHeight(48),
-                              )
-                            : null,
-                        onPressed: () => context
-                            .read<RestaurantState>()
-                            .exportDailyInvoicePdf(),
-                        icon: const Icon(Icons.picture_as_pdf),
-                        label: const Text('PDF du jour'),
-                      );
+                      final isManager =
+                          context.read<RestaurantState>().role ==
+                          UserRole.manager;
+                      final pdfBtn = isManager
+                          ? FilledButton.icon(
+                              onPressed: () => context
+                                  .read<RestaurantState>()
+                                  .exportDailyInvoicePdf(),
+                              icon: const Icon(Icons.picture_as_pdf),
+                              label: const Text('PDF du jour'),
+                            )
+                          : const SizedBox.shrink(); // 👈 serveur: pas de bouton
 
                       if (isPhone) {
                         return Column(
@@ -2311,9 +2729,24 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       return ListTile(
                         leading: const Icon(Icons.calendar_today_outlined),
                         title: Text(fmtLabel.format(d)),
-                        trailing: Text(
-                          _fmt(e.value), // affichera aussi 0 €
-                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _fmt(e.value),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            IconButton(
+                              tooltip: 'PDF du ${fmtLabel.format(d)}',
+                              onPressed: () => context
+                                  .read<RestaurantState>()
+                                  .exportInvoicePdfForDay(e.key),
+                              icon: const Icon(Icons.picture_as_pdf),
+                            ),
+                          ],
                         ),
                       );
                     }).toList(),
@@ -2347,10 +2780,22 @@ class _MenuAndTablesScreenState extends State<MenuAndTablesScreen> {
     super.dispose();
   }
 
+  bool _tablesInit = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_tablesInit) {
+      final state = context.read<RestaurantState>();
+      _tablesCtl.text = state.tableCount.toString();
+      _tablesInit = true;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<RestaurantState>();
-    _tablesCtl.text = state.tableCount.toString();
+
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
