@@ -1,0 +1,33 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "restaurant_billing",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "restaurant_billing (profile mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "restaurant_billing (release mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        },
+        {
+            "name": "Flutter",
+            "type": "dart",
+            "request": "launch",
+            "toolArgs": [
+                "--dart-define=SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1xd3ZjZm92Zmp5bHNsYmh2d29vIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYzMDE0MDgsImV4cCI6MjA3MTg3NzQwOH0.nzQhgLJrYBv_54MKn5uRv1le4MLzMyAK9f1eJVaCH7I"
+            ]
+        }
+    ]
+}

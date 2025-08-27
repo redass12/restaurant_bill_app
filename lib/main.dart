@@ -9,7 +9,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart'; // généré par flutterfire
-
+import 'package:http/http.dart' as http;
 import 'widgets/fancy_brand_bar.dart';
 // PDF
 import 'package:pdf/widgets.dart' as pw;
@@ -24,9 +24,16 @@ import 'screens/login_screen.dart';
 import 'menu_seed.dart';
 import 'screens/SetupProfileScreen.dart';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:supabase_flutter/supabase_flutter.dart'
+    show Supabase, FileOptions;
+
+const supabaseUrl = 'https://mqwvcfovfjylslbhvwoo.supabase.co';
+const supabaseKey = String.fromEnvironment('SUPABASE_KEY');
+
 final navigatorKey = GlobalKey<NavigatorState>();
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final errorCenter = ErrorCenter();
@@ -74,6 +81,17 @@ void main() {
   // Catch all uncaught errors in a zone.
   runZonedGuarded(
     () async {
+      // ---------- Supabase (optional if key provided via --dart-define) ----------
+      if (supabaseKey.isNotEmpty) {
+        await Supabase.initialize(url: supabaseUrl, anonKey: supabaseKey);
+      } else {
+        debugPrint(
+          '[Supabase] SUPABASE_KEY not provided. '
+          'Pass --dart-define=SUPABASE_KEY=YOUR_ANON_KEY to enable Supabase.',
+        );
+      }
+
+      // ---------- Firebase ----------
       await Firebase.initializeApp(
         options: DefaultFirebaseOptions.currentPlatform,
       );
@@ -974,79 +992,79 @@ class RestaurantState extends ChangeNotifier {
     }
   }
 
-Future<double> closeTableAndAddToDaily(int tableNumber) async {
-  final table = _findTable(tableNumber);
-  if (table == null) {
-    errorCenter.report(AppError(userMessage: 'Table introuvable.'));
-    return 0.0;
-  }
-
-  try {
-    final amount = table.total;
-    final dayKey = _todayKey();
-    final todayDoc = _daysCol.doc(dayKey);
-    final journalCol = todayDoc.collection('journal');
-
-    await _db.runTransaction((tx) async {
-      // 1) total global (manager)
-      tx.set(todayDoc, {
-        'total': FieldValue.increment(amount),
-        'tz': 'Europe/Madrid',
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-
-      // 2) lignes du journal (TOUJOURS avec serverUid)
-      for (final it in table.items) {
-        tx.set(journalCol.doc(), {
-          'ts': FieldValue.serverTimestamp(),
-          'table': tableNumber,
-          'dishId': it.dish.id,
-          'name': it.dish.name,
-          'price': it.dish.price,
-          'qty': it.quantity,
-          'total': it.lineTotal,
-          'serverUid': currentUid,
-        });
-      }
-
-      // 3) vider la table
-      tx.set(_tableDoc(tableNumber), {
-        'items': [],
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-    });
-
-    // 🔸 Miroir local immédiat pour les serveurs
-    if (role == UserRole.server) {
-      final nowTs = Timestamp.now();
-      for (final it in table.items) {
-        _journalToday.add({
-          'ts': nowTs,
-          'table': tableNumber,
-          'dishId': it.dish.id,
-          'name': it.dish.name,
-          'price': it.dish.price,
-          'qty': it.quantity,
-          'total': it.lineTotal,
-          'serverUid': currentUid,
-        });
-      }
+  Future<double> closeTableAndAddToDaily(int tableNumber) async {
+    final table = _findTable(tableNumber);
+    if (table == null) {
+      errorCenter.report(AppError(userMessage: 'Table introuvable.'));
+      return 0.0;
     }
 
-    table.clear();
-    notifyListeners();
-    return amount;
-  } catch (e, st) {
-    errorCenter.report(AppError(
-      userMessage: 'Impossible de fermer la table.',
-      error: e,
-      stackTrace: st,
-    ));
-    return 0.0;
+    try {
+      final amount = table.total;
+      final dayKey = _todayKey();
+      final todayDoc = _daysCol.doc(dayKey);
+      final journalCol = todayDoc.collection('journal');
+
+      await _db.runTransaction((tx) async {
+        // 1) total global (manager)
+        tx.set(todayDoc, {
+          'total': FieldValue.increment(amount),
+          'tz': 'Europe/Madrid',
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+
+        // 2) lignes du journal (TOUJOURS avec serverUid)
+        for (final it in table.items) {
+          tx.set(journalCol.doc(), {
+            'ts': FieldValue.serverTimestamp(),
+            'table': tableNumber,
+            'dishId': it.dish.id,
+            'name': it.dish.name,
+            'price': it.dish.price,
+            'qty': it.quantity,
+            'total': it.lineTotal,
+            'serverUid': currentUid,
+          });
+        }
+
+        // 3) vider la table
+        tx.set(_tableDoc(tableNumber), {
+          'items': [],
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      });
+
+      // 🔸 Miroir local immédiat pour les serveurs
+      if (role == UserRole.server) {
+        final nowTs = Timestamp.now();
+        for (final it in table.items) {
+          _journalToday.add({
+            'ts': nowTs,
+            'table': tableNumber,
+            'dishId': it.dish.id,
+            'name': it.dish.name,
+            'price': it.dish.price,
+            'qty': it.quantity,
+            'total': it.lineTotal,
+            'serverUid': currentUid,
+          });
+        }
+      }
+
+      table.clear();
+      notifyListeners();
+      return amount;
+    } catch (e, st) {
+      errorCenter.report(
+        AppError(
+          userMessage: 'Impossible de fermer la table.',
+          error: e,
+          stackTrace: st,
+        ),
+      );
+      return 0.0;
+    }
   }
-}
-
-
 
   Future<void> closeAllOpenTablesToDaily() async {
     try {
@@ -1097,6 +1115,11 @@ Future<double> closeTableAndAddToDaily(int tableNumber) async {
           stackTrace: st,
         ),
       );
+    }
+    if (role == UserRole.manager) {
+      try {
+        await saveManagerPdfForDay(_todayKey());
+      } catch (_) {}
     }
   }
 
@@ -1215,6 +1238,433 @@ Future<double> closeTableAndAddToDaily(int tableNumber) async {
   }
 
   // ---------- PDF (web-safe) ----------
+  // Instance Storage (place near your other service fields)
+
+  // ---------- PDF (web-safe) ----------
+  Future<Uint8List> _buildInvoicePdfBytesForDay(
+    String dayKey, {
+    required bool managerView,
+  }) async {
+    final baseFont = await PdfGoogleFonts.robotoRegular();
+    final boldFont = await PdfGoogleFonts.robotoBold();
+    final doc = pw.Document();
+
+    // --- fetch lines (journal or archive) ---
+    final dayRef = _daysCol.doc(dayKey);
+    Query<Map<String, dynamic>> q = dayRef.collection('journal').orderBy('ts');
+    if (!managerView) {
+      q = dayRef
+          .collection('journal')
+          .where('serverUid', isEqualTo: currentUid)
+          .orderBy('ts');
+    }
+
+    List<Map<String, dynamic>> lines = [];
+    try {
+      final jr = await q.get();
+      if (jr.docs.isNotEmpty) {
+        lines = jr.docs.map((d) => d.data()).toList();
+      } else {
+        Query<Map<String, dynamic>> qa = dayRef
+            .collection('journal_archive')
+            .orderBy('ts');
+        if (!managerView) {
+          qa = dayRef
+              .collection('journal_archive')
+              .where('serverUid', isEqualTo: currentUid)
+              .orderBy('ts');
+        }
+        final ar = await qa.get();
+        lines = ar.docs.map((d) => d.data()).toList();
+      }
+    } catch (_) {}
+
+    // --- total ---
+    double totalJour = 0.0;
+    if (managerView) {
+      try {
+        final ds = await dayRef.get();
+        totalJour = (ds.data()?['total'] as num?)?.toDouble() ?? 0.0;
+      } catch (_) {
+        for (final e in lines) {
+          totalJour += (e['total'] as num?)?.toDouble() ?? 0.0;
+        }
+      }
+    } else {
+      for (final e in lines) {
+        totalJour += (e['total'] as num?)?.toDouble() ?? 0.0;
+      }
+    }
+
+    final date = DateTime.tryParse(dayKey);
+    final dateLabel = date == null
+        ? dayKey
+        : DateFormat('EEEE d MMMM y', 'fr_FR').format(date);
+
+    final rows = lines.map((e) {
+      final p = (e['price'] is num) ? (e['price'] as num).toDouble() : 0.0;
+      final tt = (e['total'] is num) ? (e['total'] as num).toDouble() : 0.0;
+      return [
+        '${e['table']}',
+        '${e['name']}',
+        '${e['qty']}',
+        _fmt(p),
+        _fmt(tt),
+      ];
+    }).toList();
+
+    doc.addPage(
+      pw.MultiPage(
+        pageTheme: const pw.PageTheme(margin: pw.EdgeInsets.all(32)),
+        build: (_) => [
+          pw.Header(
+            level: 0,
+            child: pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text(
+                      _brandName,
+                      style: pw.TextStyle(font: boldFont, fontSize: 24),
+                    ),
+                    pw.Text(
+                      managerView
+                          ? 'Facture — $dateLabel'
+                          : 'Mes ventes — $dateLabel',
+                      style: pw.TextStyle(font: baseFont, fontSize: 12),
+                    ),
+                  ],
+                ),
+                pw.Text(
+                  'Total: ${_fmt(totalJour)}',
+                  style: pw.TextStyle(font: boldFont, fontSize: 18),
+                ),
+              ],
+            ),
+          ),
+          if (rows.isEmpty)
+            pw.Padding(
+              padding: const pw.EdgeInsets.only(top: 40),
+              child: pw.Text(
+                totalJour > 0
+                    ? 'Impression du total uniquement.'
+                    : (managerView
+                          ? 'Aucune vente enregistrée ce jour-là.'
+                          : 'Aucune vente enregistrée pour votre compte ce jour-là.'),
+                style: pw.TextStyle(font: baseFont, fontSize: 14),
+              ),
+            )
+          else
+            pw.Table.fromTextArray(
+              headers: const ['Table', 'Article', 'Qté', 'Prix', 'Total'],
+              data: rows,
+              headerStyle: pw.TextStyle(font: boldFont),
+              headerDecoration: pw.BoxDecoration(color: pdf.PdfColors.grey300),
+              cellStyle: pw.TextStyle(font: baseFont, fontSize: 11),
+              cellAlignment: pw.Alignment.centerLeft,
+              columnWidths: {
+                0: const pw.FixedColumnWidth(50),
+                1: const pw.FlexColumnWidth(),
+                2: const pw.FixedColumnWidth(40),
+                3: const pw.FixedColumnWidth(60),
+                4: const pw.FixedColumnWidth(70),
+              },
+            ),
+          pw.SizedBox(height: 12),
+          pw.Align(
+            alignment: pw.Alignment.centerRight,
+            child: pw.Container(
+              padding: const pw.EdgeInsets.all(8),
+              decoration: pw.BoxDecoration(
+                border: pw.Border.all(color: pdf.PdfColor.fromInt(0xFFCCCCCC)),
+              ),
+              child: pw.Text(
+                (managerView ? 'TOTAL JOUR: ' : 'MON TOTAL: ') +
+                    _fmt(totalJour),
+                style: pw.TextStyle(font: boldFont, fontSize: 14),
+              ),
+            ),
+          ),
+          pw.SizedBox(height: 24),
+          pw.Text(
+            'Référence: $dayKey • Généré via ${_brandName}',
+            style: pw.TextStyle(font: baseFont),
+          ),
+        ],
+      ),
+    );
+
+    return await doc.save();
+  }
+
+  Future<void> printAndStorePdfForDay(
+  String dayKey, {
+  required bool managerView,
+}) async {
+  // Route all callers through the new "generate → upload → fallback" flow
+  await openPdfFromSupabaseOrGenerate(dayKey, managerView: managerView);
+    try {
+      // 1) Génère le PDF en mémoire (même logique que le bouton "Jour")
+      final bytes = await _buildInvoicePdfBytesForDay(
+        dayKey,
+        managerView: managerView,
+      );
+
+      // 2) Affiche immédiatement
+      if (kIsWeb) {
+        await Printing.layoutPdf(onLayout: (_) async => bytes);
+      } else {
+        await Printing.sharePdf(bytes: bytes, filename: 'Facture_$dayKey.pdf');
+      }
+      // 3) Stocke dans Supabase Storage + marqueur Firestore
+      final path = managerView ? _managerPath(dayKey) : _serverPath(dayKey);
+
+      // sécurité: clé requise
+      if (supabaseKey.isEmpty) {
+        throw Exception(
+          'SUPABASE_KEY manquant (—dart-define=SUPABASE_KEY=...)',
+        );
+      }
+
+      await _uploadPdfToSupabase(
+        bytes: bytes,
+        path: path, // ex: restaurants/<restId>/invoices/<dayKey>/manager.pdf
+        dayKey: dayKey,
+        label: managerView ? 'manager' : 'server',
+      );
+    } catch (e, st) {
+      final ctx = navigatorKey.currentContext;
+      if (ctx != null) {
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(
+            content: Text(
+              'PDF: ${e is FlutterError ? e.message : e.toString()}',
+            ),
+          ),
+        );
+      }
+      errorCenter.report(
+        AppError(
+          userMessage: 'Le PDF n’a pas pu être généré/affiché.',
+          error: e,
+          stackTrace: st,
+        ),
+      );
+    }
+  }
+
+  // ---------- PDF storage helpers ----------
+  String _managerPath(String dayKey) =>
+      'restaurants/$restaurantId/invoices/$dayKey/manager.pdf';
+
+  String _serverPath(String dayKey) =>
+      'restaurants/$restaurantId/invoices/$dayKey/server_$currentUid.pdf';
+
+  Future<String> _uploadPdfToSupabase({
+    required Uint8List bytes,
+    required String
+    path, // ex: restaurants/<restId>/invoices/<dayKey>/manager.pdf
+    required String dayKey,
+    required String label, // 'manager' | 'server'
+  }) async {
+    final supa = Supabase.instance.client;
+    const bucket = 'invoices';
+
+    debugPrint('[Supabase] Uploading $path (${bytes.lengthInBytes} bytes)');
+    // Upload (upsert = remplace si existe)
+    await supa.storage
+        .from(bucket)
+        .uploadBinary(
+          path,
+          bytes,
+          fileOptions: const FileOptions(
+            contentType: 'application/pdf',
+            upsert: true,
+          ),
+        );
+
+    // URL publique (si bucket public)
+    final publicUrl = supa.storage.from(bucket).getPublicUrl(path);
+
+    debugPrint('[Supabase] Uploaded OK → $publicUrl');
+    final ctx = navigatorKey.currentContext;
+    if (ctx != null) {
+      ScaffoldMessenger.of(
+        ctx,
+      ).showSnackBar(SnackBar(content: Text('PDF upload OK (Supabase)')));
+    }
+
+    // Marqueur Firestore (même logique que Firebase)
+    await _daysCol.doc(dayKey).set({
+      'pdf': {
+        if (label == 'manager')
+          'manager': {
+            'path': path,
+            'url': publicUrl,
+            'provider': 'supabase',
+            'createdAt': FieldValue.serverTimestamp(),
+          }
+        else
+          'servers': {
+            currentUid: {
+              'path': path,
+              'url': publicUrl,
+              'provider': 'supabase',
+              'createdAt': FieldValue.serverTimestamp(),
+            },
+          },
+      },
+    }, SetOptions(merge: true));
+
+    return publicUrl;
+  }
+
+  // ---------- download pdf from supabase ----------
+
+Future<void> openPdfFromSupabaseOrGenerate(
+  String dayKey, {
+  required bool managerView,
+}) async {
+  final path = managerView ? _managerPath(dayKey) : _serverPath(dayKey);
+  const bucket = 'invoices';
+
+  bool shown = false;
+
+  // 1) Try: GENERATE + SHOW
+  try {
+    final bytes = await _buildInvoicePdfBytesForDay(
+      dayKey,
+      managerView: managerView,
+    );
+
+    if (kIsWeb) {
+      await Printing.layoutPdf(onLayout: (_) async => bytes);
+    } else {
+      await Printing.sharePdf(bytes: bytes, filename: 'Facture_$dayKey.pdf');
+    }
+    shown = true;
+
+    // 1b) Best-effort UPLOAD (overwrite). If it fails, try reading from Supabase.
+    if (supabaseKey.isNotEmpty) {
+      try {
+        await _uploadPdfToSupabase(
+          bytes: bytes,
+          path: path,
+          dayKey: dayKey,
+          label: managerView ? 'manager' : 'server',
+        );
+      } catch (e, st) {
+        // Upload failed — try to fetch the existing copy from Supabase (don’t re-show if already shown)
+        errorCenter.report(AppError(
+          userMessage: 'Upload Supabase échoué — tentative de lecture.',
+          error: e,
+          stackTrace: st,
+        ));
+        try {
+          final supa = Supabase.instance.client;
+          // Prefer signed url; fallback to public url
+          String url = supa.storage.from(bucket).getPublicUrl(path);
+          try {
+            final signed = await supa.storage.from(bucket).createSignedUrl(path, 60);
+            if (signed.isNotEmpty) url = signed;
+          } catch (_) {}
+
+          final res = await http.get(Uri.parse(url));
+          if (res.statusCode == 200 && res.bodyBytes.isNotEmpty && !shown) {
+            final b = res.bodyBytes;
+            if (kIsWeb) {
+              await Printing.layoutPdf(onLayout: (_) async => b);
+            } else {
+              await Printing.sharePdf(bytes: b, filename: 'Facture_$dayKey.pdf');
+            }
+            shown = true;
+          }
+        } catch (_) {
+          // ignore — we already showed the generated PDF
+        }
+      }
+    }
+
+    return; // ✅ Done (generated, shown, and upload attempted)
+  } catch (e, st) {
+    // Generation or showing failed → FALLBACK to Supabase download
+    errorCenter.report(AppError(
+      userMessage: 'Génération du PDF indisponible — chargement depuis Supabase…',
+      error: e,
+      stackTrace: st,
+    ));
+  }
+
+  // 2) FALLBACK: fetch existing file from Supabase and show it
+  try {
+    final supa = Supabase.instance.client;
+    // Prefer signed url; fallback to public url
+    String url = supa.storage.from(bucket).getPublicUrl(path);
+    try {
+      final signed = await supa.storage.from(bucket).createSignedUrl(path, 60);
+      if (signed.isNotEmpty) url = signed;
+    } catch (_) {}
+
+    final res = await http.get(Uri.parse(url));
+    if (res.statusCode != 200 || res.bodyBytes.isEmpty) {
+      throw Exception('HTTP ${res.statusCode} / bytes=${res.bodyBytes.length}');
+    }
+
+    final bytes = res.bodyBytes;
+    if (kIsWeb) {
+      await Printing.layoutPdf(onLayout: (_) async => bytes);
+    } else {
+      await Printing.sharePdf(bytes: bytes, filename: 'Facture_$dayKey.pdf');
+    }
+  } catch (e, st) {
+    final ctx = navigatorKey.currentContext;
+    if (ctx != null) {
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Aucun PDF disponible (génération et lecture Supabase ont échoué).',
+          ),
+        ),
+      );
+    }
+    errorCenter.report(AppError(
+      userMessage: 'Échec d’ouverture du PDF.',
+      error: e,
+      stackTrace: st,
+    ));
+  }
+}
+
+  // ---------- PDF public API ----------
+  Future<void> saveManagerPdfForDay(String dayKey) async {
+    if (role != UserRole.manager) return;
+    final bytes = await _buildInvoicePdfBytesForDay(dayKey, managerView: true);
+    if (supabaseKey.isEmpty) {
+      throw Exception('SUPABASE_KEY manquant (—dart-define=SUPABASE_KEY=...)');
+    }
+    await _uploadPdfToSupabase(
+      bytes: bytes,
+      path: _managerPath(dayKey),
+      dayKey: dayKey,
+      label: 'manager',
+    );
+  }
+
+  Future<void> saveMyServerPdfForDay(String dayKey) async {
+    final bytes = await _buildInvoicePdfBytesForDay(dayKey, managerView: false);
+    if (supabaseKey.isEmpty) {
+      throw Exception('SUPABASE_KEY manquant (—dart-define=SUPABASE_KEY=...)');
+    }
+    await _uploadPdfToSupabase(
+      bytes: bytes,
+      path: _serverPath(dayKey),
+      dayKey: dayKey,
+      label: 'server',
+    );
+  }
+
   Future<void> exportDailyInvoicePdf() async {
     try {
       // ✅ Use Google fonts provided by `printing` (no asset files required)
@@ -1570,53 +2020,66 @@ Future<double> closeTableAndAddToDaily(int tableNumber) async {
   }
 
   // ---------- Minuit ----------
-void _scheduleMidnightTick() {
-  _midnightTimer?.cancel();
+  void _scheduleMidnightTick() {
+    _midnightTimer?.cancel();
 
-  final now = DateTime.now();
-  final nextMidnight = DateTime(now.year, now.month, now.day)
-      .add(const Duration(days: 1));
+    final now = DateTime.now();
+    final nextMidnight = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).add(const Duration(days: 1));
 
-  _midnightTimer = Timer(
-    nextMidnight.difference(now) + const Duration(seconds: 1),
-    () async {
-      try {
-        await _ensureTodayDocExists();
-      } catch (_) {}
+    _midnightTimer = Timer(
+      nextMidnight.difference(now) + const Duration(seconds: 1),
+      () async {
+        // ✅ NEW: generate & store yesterday's PDF before switching to the new day
+        final prevKey = DateFormat(
+          'yyyy-MM-dd',
+        ).format(DateTime.now().subtract(const Duration(seconds: 1)));
+        if (role == UserRole.manager) {
+          try {
+            await saveManagerPdfForDay(prevKey);
+          } catch (_) {}
+        }
+        try {
+          await _ensureTodayDocExists();
+        } catch (_) {}
 
-      _todaySub?.cancel();
-      _todayJournalSub?.cancel();
+        _todaySub?.cancel();
+        _todayJournalSub?.cancel();
 
-      final todayDoc = _daysCol.doc(_todayKey());
+        final todayDoc = _daysCol.doc(_todayKey());
 
-      // Manager: lit le total global ; Serveur: pas de lecture du doc jour
-      if (role == UserRole.manager) {
-        _todaySub = todayDoc.snapshots().listen((doc) {
-          _dailyTotal = (doc.data()?['total'] as num?)?.toDouble() ?? 0.0;
+        // Manager: lit le total global ; Serveur: pas de lecture du doc jour
+        if (role == UserRole.manager) {
+          _todaySub = todayDoc.snapshots().listen((doc) {
+            _dailyTotal = (doc.data()?['total'] as num?)?.toDouble() ?? 0.0;
+            notifyListeners();
+          }, onError: _onStreamError);
+        } else {
+          _dailyTotal = 0.0; // le total serveur = somme(_journalToday)
+        }
+
+        // Journal: manager = tout ; serveur = filtré par son uid
+        Query<Map<String, dynamic>> jq = todayDoc
+            .collection('journal')
+            .orderBy('ts');
+        if (role == UserRole.server) {
+          jq = todayDoc
+              .collection('journal')
+              .where('serverUid', isEqualTo: currentUid)
+              .orderBy('ts');
+        }
+        _todayJournalSub = jq.snapshots().listen((qs) {
+          _journalToday = qs.docs.map((d) => d.data()).toList();
           notifyListeners();
         }, onError: _onStreamError);
-      } else {
-        _dailyTotal = 0.0; // le total serveur = somme(_journalToday)
-      }
 
-      // Journal: manager = tout ; serveur = filtré par son uid
-      Query<Map<String, dynamic>> jq = todayDoc.collection('journal').orderBy('ts');
-      if (role == UserRole.server) {
-        jq = todayDoc.collection('journal')
-            .where('serverUid', isEqualTo: currentUid)
-            .orderBy('ts');
-      }
-      _todayJournalSub = jq.snapshots().listen((qs) {
-        _journalToday = qs.docs.map((d) => d.data()).toList();
-        notifyListeners();
-      }, onError: _onStreamError);
-
-      _scheduleMidnightTick();
-    },
-  );
-}
-
-
+        _scheduleMidnightTick();
+      },
+    );
+  }
 
   // ---------- Utils ----------
   static String _id() => DateTime.now().microsecondsSinceEpoch.toString();
@@ -1640,6 +2103,7 @@ class MyApp extends StatelessWidget {
       navigatorKey: navigatorKey,
       title: 'Ristorante Manager',
       theme: _restaurantTheme(),
+      debugShowCheckedModeBanner: false,
       home: const _AuthGate(),
     );
   }
@@ -1778,17 +2242,19 @@ class _RootScreenState extends State<RootScreen> {
     return Scaffold(
       appBar: FancyBrandBar(
         actions: [
-          if (isManager) // 👈 le serveur ne voit pas le bouton PDF global
+          if (isManager)
             IconButton(
               tooltip: 'PDF du jour',
-              onPressed: () =>
-                  context.read<RestaurantState>().exportDailyInvoicePdf(),
               icon: const Icon(Icons.picture_as_pdf, color: Colors.white),
+              onPressed: () async {
+                final st = context.read<RestaurantState>();
+                await st.printAndStorePdfForDay(st.todayKey, managerView: true);
+              },
             ),
           IconButton(
             tooltip: 'Se déconnecter',
-            onPressed: () => FirebaseAuth.instance.signOut(),
             icon: const Icon(Icons.logout, color: Colors.white),
+            onPressed: () => FirebaseAuth.instance.signOut(),
           ),
         ],
       ),
@@ -2180,28 +2646,27 @@ class _OrdersSinglePageState extends State<OrdersSinglePage> {
                 ],
               ),
               const SizedBox(height: 8),
+              // inside OrdersSinglePage (near the bottom)
               SizedBox(
                 width: double.infinity,
                 child: Builder(
                   builder: (context) {
-                    final isManager =
-                        context.read<RestaurantState>().role ==
-                        UserRole.manager;
+                    final st = context.read<RestaurantState>();
+                    final isManager = st.role == UserRole.manager;
+
                     return FilledButton.icon(
-                      onPressed: () {
-                        final st = context.read<RestaurantState>();
-                        if (isManager) {
-                          st.exportDailyInvoicePdf();
-                        } else {
-                          st.exportInvoicePdfForDay(
-                            st.todayKey,
-                          ); // PDF perso (serveur)
-                        }
-                      },
                       icon: const Icon(Icons.picture_as_pdf),
                       label: Text(
                         isManager ? 'PDF du jour' : 'Mon PDF du jour',
                       ),
+                      onPressed: () async {
+                        final st = context.read<RestaurantState>();
+                        final isManager = st.role == UserRole.manager;
+                        await st.printAndStorePdfForDay(
+                          st.todayKey,
+                          managerView: isManager,
+                        );
+                      },
                     );
                   },
                 ),
@@ -2549,13 +3014,18 @@ class DailyScreen extends StatelessWidget {
                           UserRole.manager;
                       final pdfBtn = isManager
                           ? FilledButton.icon(
-                              onPressed: () => context
-                                  .read<RestaurantState>()
-                                  .exportDailyInvoicePdf(),
+                              onPressed: () async {
+                                final st = context.read<RestaurantState>();
+                                await st.printAndStorePdfForDay(
+                                  st.todayKey,
+                                  managerView: true,
+                                );
+                              },
                               icon: const Icon(Icons.picture_as_pdf),
                               label: const Text('PDF du jour'),
                             )
-                          : const SizedBox.shrink(); // 👈 serveur: pas de bouton
+                          : const SizedBox.shrink();
+                      // 👈 serveur: pas de bouton
 
                       if (isPhone) {
                         return Column(
@@ -2741,10 +3211,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             const SizedBox(width: 8),
                             IconButton(
                               tooltip: 'PDF du ${fmtLabel.format(d)}',
-                              onPressed: () => context
-                                  .read<RestaurantState>()
-                                  .exportInvoicePdfForDay(e.key),
                               icon: const Icon(Icons.picture_as_pdf),
+                              onPressed: () async {
+                                final st = context.read<RestaurantState>();
+                                final isManager = st.role == UserRole.manager;
+                                await st.openPdfFromSupabaseOrGenerate(
+                                  e.key,
+                                  managerView: isManager,
+                                );
+                              },
                             ),
                           ],
                         ),
